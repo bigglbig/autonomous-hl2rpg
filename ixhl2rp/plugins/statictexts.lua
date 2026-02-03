@@ -1,258 +1,336 @@
 local PLUGIN = PLUGIN
 
 PLUGIN.name = "Static Texts"
-PLUGIN.author = "Schwarz Kruppzo"
-PLUGIN.description = "Позволяет игрокам создавать и управлять постоянными текстовыми аннотациями."
+PLUGIN.author = "big"
+PLUGIN.description = "Добавить летающий текст."
 
-local annotations = PLUGIN.annotations or {}
-PLUGIN.annotations = annotations
+local texts = PLUGIN.texts or {}
+PLUGIN.texts = texts
 
-ix.config.Add("annotationDuration", 240, "Время в минутах до автоматического истечения аннотации.", nil, {
-	data = {min = 1, max = 10080},
-	category = "Utilities"
+ix.config.Add("staticTextLifeTime", 240, "Время через которое текст будет удален (в минутах)", nil, {
+    data = {min = 1, max = 10080},
+    category = "Other"
 })
 
 CAMI.RegisterPrivilege({
-	Name = "Helix - Map Annotations",
-	MinAccess = "admin"
+    Name = "Helix - Static Texts",
+    MinAccess = "admin"
 })
 
-local function createAnnotationData(client, annotationText)
-	return {
-		position = client:GetPos() + Vector(0, 0, 30),
-		content = annotationText,
-		ownerName = client:GetName(),
-		ownerSteamID = client:SteamID(),
-		createdAt = os.date("%m/%d/%Y %H:%M:%S", os.time())
-	}
-end
+-- Иконка глаза для отображения
+PLUGIN.eyeIcon = Material("big_ui/util/eye.png")
 
-local function validateAdd(client, annotationText, clientPos)
-	if annotationText:Trim() == "" then
-		return false
-	end
+do
+    local COMMAND = {}
+    COMMAND.description = "Добавить летающий текст."
+    COMMAND.arguments = ix.type.text
+    COMMAND.privilege = "Static Texts"
+    COMMAND.alias = {"StaticTextAdd", "SceneTextAdd"}
 
-	for _, annotation in ipairs(annotations) do
-		if annotation.position:DistToSqr(clientPos) < 2500 then
-			client:Notify("Это место слишком близко к существующей аннотации!")
-			return false
-		end
+    function COMMAND:OnRun(client, text)
+        local curTime = CurTime()
 
-		if annotation.ownerSteamID == client:SteamID() and !CAMI.PlayerHasAccess(client, "Helix - Map Annotations") then
-			client:Notify("У вас может быть только одна активная аннотация. Сначала удалите свою.")
-			return false
-		end
-	end
+        if (client.nextStaticText and client.nextStaticText >= curTime) then
+            client:NotifyLocalized("notNow")
 
-	return true
+            return
+        end
+
+        if (text == "") then
+            return
+        end
+
+        local pos = client:GetPos()
+        
+        for k, v in pairs(texts) do
+            if (v.pos:DistToSqr(pos) < 50 * 50) then
+                client:Notify("Слишком близко к остальному тексту!")
+
+                return
+            end
+
+            if (v.steamid == client:SteamID() and !CAMI.PlayerHasAccess(client, "Helix - Static Texts")) then
+                client:Notify("У вас уже есть статический текст, удалите его, прежде чем добавлять новый.")
+
+                return
+            end
+        end
+
+        local data = {
+            pos = pos + Vector(0, 0, 30),
+            text = text,
+            name = client:GetName(),
+            steamid = client:SteamID(),
+            time = os.date("%d/%m/%y %X", os.time()),
+            showText = false, 
+            eyeAlpha = 0, 
+            textAlpha = 0, 
+            proximityAlpha = 0, 
+            lookAlpha = 0 
+        }
+
+        PLUGIN:AddStaticText(data)
+
+        client.nextStaticText = curTime + 5
+        client:Notify("Текст добавлен.")
+
+        ix.log.Add(client, "staticTextAdded", text)
+    end
+
+    ix.command.Add("SceneText", COMMAND)
 end
 
 do
-	local CMD = {}
-	CMD.description = "Разместить описательную аннотацию в текущем месте."
-	CMD.arguments = ix.type.text
-	CMD.privilege = "Map Annotations"
-	CMD.alias = {"StaticTextAdd", "SceneTextAdd"}
+    local COMMAND = {}
+    COMMAND.description = "Удалить летающий текст."
+    COMMAND.privilege = "Static Texts"
+    COMMAND.alias = {"StaticTextRemove", "RemoveSceneText"}
 
-	function CMD:OnRun(client, annotationText)
-		local currentTime = CurTime()
+    function COMMAND:OnRun(client)
+        local trace = client:GetEyeTraceNoCursor()
 
-		if client.lastAnnotationTime and client.lastAnnotationTime > currentTime then
-			client:NotifyLocalized("tooSoon")
-			return
-		end
+        if (trace.Hit) then
+            local pos = trace.HitPos
 
-		local clientPos = client:GetPos()
+            for k, v in pairs(texts) do
+                if (v.pos:DistToSqr(pos) < 50 * 50) then
+                    if (v.steamid == client:SteamID() or CAMI.PlayerHasAccess(client, "Helix - Static Texts")) then
+                        PLUGIN:RemoveStaticText(k)
+                        client:Notify("Летающий текст удален.")
 
-		if !validateAdd(client, annotationText, clientPos) then
-			return
-		end
+                        ix.log.Add(client, "staticTextRemoved", text)
+                    else
+                        client:Notify("У вас нет разрешения удалять этот текст.")
+                    end
 
-		local annotationData = createAnnotationData(client, annotationText)
-		PLUGIN:CreateAnnotation(annotationData)
+                    return
+                end
+            end
+        end
+    end
 
-		client.lastAnnotationTime = currentTime + 5
-		client:Notify("Аннотация успешно размещена.")
-
-		ix.log.Add(client, "annotationCreated", annotationText)
-	end
-
-	ix.command.Add("SceneText", CMD)
+    ix.command.Add("SceneTextRemove", COMMAND)
 end
 
-do
-	local CMD = {}
-	CMD.description = "Удалить ближайшую аннотацию."
-	CMD.privilege = "Map Annotations"
-	CMD.alias = {"StaticTextRemove", "RemoveSceneText"}
+if (CLIENT) then
+    local nextCheck = -1
+    local EYE_SIZE = 46 -- Размер иконки глаза
+    local FADE_SPEED = 5 -- Скорость плавного перехода
+    local MAX_VIEW_DISTANCE = 400 -- Максимальное расстояние для плавного появления
+    local MIN_VIEW_DISTANCE = 100 -- Минимальное расстояние для полной видимости
+    local PROXIMITY_FADE_START = 300 -- Расстояние, с которого начинается появление глаза
 
-	function CMD:OnRun(client)
-		local eyeTrace = client:GetEyeTraceNoCursor()
+    local function CanSee(client, clientPos, data)
+        local curTime = CurTime()
 
-		if !eyeTrace.Hit then
-			return
-		end
+        if (nextCheck <= curTime or !data.visible) then
+            local trace = util.TraceLine({
+                start = clientPos,
+                endpos = data.pos,
+                mask = MASK_SOLID_BRUSHONLY
+            })
 
-		local hitPosition = eyeTrace.HitPos
+            data.visible = !trace.hit
+        end
 
-		for index, annotation in ipairs(annotations) do
-			if annotation.position:DistToSqr(hitPosition) < 2500 then
-				if annotation.ownerSteamID == client:SteamID() or CAMI.PlayerHasAccess(client, "Helix - Map Annotations") then
-					PLUGIN:DeleteAnnotation(index)
-					client:Notify("Аннотация удалена.")
-					ix.log.Add(client, "annotationDeleted", annotation.content)
-				else
-					client:Notify("Недостаточно прав для удаления этой аннотации.")
-				end
-				return
-			end
-		end
+        return data.visible
+    end
 
-		client:Notify("Аннотация не найдена в этом направлении.")
-	end
+   
+    local function IsLookingAtEye(client, eyePos)
+        local eyePos2D = eyePos:ToScreen()
+        if (!eyePos2D.visible) then return false end
+        
+        local mouseX, mouseY = gui.MousePos()
+        local cx, cy = ScrW() * 0.5, ScrH() * 0.5
+        
+        
+        local useX, useY = mouseX, mouseY
+        if (useX == 0 and useY == 0) then
+            useX, useY = cx, cy
+        end
+        
+        local distance = math.Distance(useX, useY, eyePos2D.x, eyePos2D.y)
+        return distance <= EYE_SIZE
+    end
 
-	ix.command.Add("SceneTextRemove", CMD)
-end
+    -- Расчет альфа-канала в зависимости от расстояния
+    local function CalculateProximityAlpha(distance)
+        if distance <= MIN_VIEW_DISTANCE then
+            return 1.0 -- Полная видимость
+        elseif distance <= PROXIMITY_FADE_START then
+            -- Плавное уменьшение от 1.0 до 0.0
+            return 1.0 - ((distance - MIN_VIEW_DISTANCE) / (PROXIMITY_FADE_START - MIN_VIEW_DISTANCE))
+        else
+            return 0.0 -- Полная прозрачность
+        end
+    end
 
-if CLIENT then
-	local visibilityCacheTime = -1
-	local visibilityCache = {}
+    function PLUGIN:HUDPaint()
+        if (texts and !table.IsEmpty(texts)) then
+            local client = LocalPlayer()
+            local clientPos = client:EyePos()
+            local scrW = ScrW()
+            local cx, cy = scrW * 0.5, ScrH() * 0.5
+            local hasPermission = CAMI.PlayerHasAccess(client, "Helix - Static Texts")
+            local frameTime = FrameTime()
 
-	local function IsVisibleToclient(LocalPlayer, clientEyePos, annotation)
-		local now = CurTime()
+            for k, v in pairs(texts) do
+                local distance = clientPos:Distance(v.pos)
+                
+                if (distance <= MAX_VIEW_DISTANCE and CanSee(client, clientPos, v)) then
+                    local pos = v.pos:ToScreen()
+                    
+                    if (pos.visible) then
+                        
+                        local targetProximityAlpha = CalculateProximityAlpha(distance)
+                        
+                        
+                        v.proximityAlpha = Lerp(frameTime * 2, v.proximityAlpha, targetProximityAlpha)
+                        
+                        
+                        local lookingAtEye = IsLookingAtEye(client, v.pos)
+                        
+                        if (lookingAtEye and !v.showText) then
+                            v.showText = true
+                        elseif (!lookingAtEye and v.showText) then
+                            v.showText = false
+                        end
+                        
+                        
+                        local targetLookAlpha = v.showText and 1 or 0
+                        v.lookAlpha = Lerp(frameTime * FADE_SPEED, v.lookAlpha, targetLookAlpha)
+                        
+                        
+                        local eyeAlphaMultiplier = v.proximityAlpha * (1 - v.lookAlpha)
+                        
+                       
+                        local textAlphaMultiplier = v.proximityAlpha * v.lookAlpha
+                        
+                        
+                        local finalEyeAlpha = 255 * eyeAlphaMultiplier
+                        local finalTextAlpha = 255 * textAlphaMultiplier
+                        
+                        
+                        v.eyeAlpha = Lerp(frameTime * FADE_SPEED, v.eyeAlpha, finalEyeAlpha)
+                        v.textAlpha = Lerp(frameTime * FADE_SPEED, v.textAlpha, finalTextAlpha)
+                        
+                        
+                        if (v.eyeAlpha > 5) then 
+                            surface.SetMaterial(self.eyeIcon)
+                            surface.SetDrawColor(255, 255, 255, v.eyeAlpha)
+                            surface.DrawTexturedRect(pos.x - EYE_SIZE/2, pos.y - EYE_SIZE/2, EYE_SIZE, EYE_SIZE)
+                        end
+                        
+                        
+                        if (v.textAlpha > 5) then
+                            local camMult = (1 - math.Distance(cx, cy, pos.x, pos.y) / scrW * 1.5)
+                            local distanceMult = (1 - distance / MAX_VIEW_DISTANCE)
+                            local alpha = v.textAlpha * camMult * distanceMult
+                            local col1, col2 = Color(255, 255, 255, alpha), Color(0, 0, 0, alpha)
+                            local font = "ixGenericFont"
 
-		if visibilityCacheTime <= now or !visibilityCache[annotation] then
-			local visibilityTrace = util.TraceLine({
-				start = clientEyePos,
-				endpos = annotation.position,
-				mask = MASK_SOLID_BRUSHONLY
-			})
+                            surface.SetFont(font)
 
-			visibilityCache[annotation] = !visibilityTrace.Hit
-			visibilityCacheTime = now + 0.5
-		end
+                            local lines = ix.util.WrapText(v.text, scrW * 0.25, font)
 
-		return visibilityCache[annotation]
-	end
+                            if (input.IsKeyDown(KEY_LALT) and hasPermission) then
+                                table.insert(lines, v.name..' ('..v.steamid..')')
+                                table.insert(lines, v.time)
+                            end
 
-	function PLUGIN:HUDPaint()
-		if !annotations or #annotations == 0 then
-			return
-		end
+                            local fullH = #lines * 20 
+                            local curY = pos.y - fullH / 2
 
-		local LocalPlayer = LocalPlayer()
-		local eyePosition = LocalPlayer:EyePos()
-		local screenWidth, screenHeight = ScrW(), ScrH()
-		local screenCenterX, screenCenterY = screenWidth * 0.5, screenHeight * 0.5
-		local adminAccess = CAMI.PlayerHasAccess(LocalPlayer, "Helix - Map Annotations")
+                            for k1, v1 in pairs(lines) do
+                                local w, h = surface.GetTextSize(v1)
+                                draw.SimpleTextOutlined(v1, font, pos.x - w / 2, curY, col1, nil, nil, 1, col2)
+                                curY = curY + h + 4
+                            end
+                        end
+                    end
+                else
+                    
+                    if (v.eyeAlpha > 0 or v.textAlpha > 0) then
+                        v.eyeAlpha = Lerp(frameTime * FADE_SPEED * 2, v.eyeAlpha, 0)
+                        v.textAlpha = Lerp(frameTime * FADE_SPEED * 2, v.textAlpha, 0)
+                        v.proximityAlpha = Lerp(frameTime * 2, v.proximityAlpha, 0)
+                        v.lookAlpha = Lerp(frameTime * FADE_SPEED, v.lookAlpha, 0)
+                        v.showText = false
+                    end
+                end
+            end
+        end
+    end
 
-		for _, annotation in ipairs(annotations) do
-			local distanceSqr = eyePosition:DistToSqr(annotation.position)
-			if distanceSqr <= 90000 and IsVisibleToclient(LocalPlayer, eyePosition, annotation) then
-				local screenPos = annotation.position:ToScreen()
-				local screenDistance = math.Distance(screenCenterX, screenCenterY, screenPos.x, screenPos.y)
-				local fadeByScreen = math.max(0, 1 - (screenDistance / screenWidth) * 1.5)
-				local fadeByDistance = math.max(0, 1 - math.sqrt(distanceSqr) * 0.003333)
-				local textAlpha = 255 * fadeByScreen * fadeByDistance
+    netstream.Hook("ixStaticTextAdd", function(data)
+        table.insert(texts, data)
+    end)
 
-				local textColor = Color(255, 255, 255, textAlpha)
-				local outlineColor = Color(0, 0, 0, textAlpha)
-				local textFont = "ixGenericFont"
+    netstream.Hook("ixStaticTextRemove", function(id)
+        table.remove(texts, id)
+    end)
 
-				surface.SetFont(textFont)
-				local wrappedLines = ix.util.WrapText(annotation.content, screenWidth * 0.25, textFont)
-
-				if input.IsKeyDown(KEY_LALT) and adminAccess then
-					table.insert(wrappedLines, annotation.ownerName .. " (" .. annotation.ownerSteamID .. ")")
-					table.insert(wrappedLines, annotation.createdAt)
-				end
-
-				local lineSpacing = 4
-				local _, textHeight = surface.GetTextSize(annotation.content)
-				local totalHeight = (#wrappedLines * textHeight)
-				local startY = screenPos.y - totalHeight / 2
-
-				for lineIndex, lineText in ipairs(wrappedLines) do
-					local textWidth, lineHeight = surface.GetTextSize(lineText)
-					local lineY = startY + (lineIndex - 1) * (lineHeight + lineSpacing)
-
-					draw.SimpleTextOutlined(lineText, textFont, screenPos.x - textWidth / 2, lineY, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER, 1, outlineColor)
-				end
-			end
-		end
-	end
-
-	-- Netstream hooks for client
-	netstream.Hook("ixAnnotationCreate", function(newAnnotation)
-		table.insert(annotations, newAnnotation)
-	end)
-
-	netstream.Hook("ixAnnotationDelete", function(annotationIndex)
-		table.remove(annotations, annotationIndex)
-	end)
-
-	netstream.Hook("ixAnnotationSync", function(allAnnotations)
-		annotations = allAnnotations
-	end)
-
+    netstream.Hook("ixStaticTextSet", function(data)
+        texts = data
+    end)
 else
-	ix.log.AddType("annotationCreated", function(client, content)
-		return string.format("%s создал аннотацию: %s", client:GetName(), content)
-	end)
+    ix.log.AddType("staticTextAdded", function(client, text)
+        return string.format("%s добавил лелающий текст: %s", client:GetName(), text)
+    end)
 
-	ix.log.AddType("annotationDeleted", function(client, content)
-		return string.format("%s удалил аннотацию: %s", client:GetName(), content)
-	end)
+    ix.log.AddType("staticTextRemoved", function(client, text)
+        return string.format("%s удалил летающий текст: %s", client:GetName(), text)
+    end)
 
-	function PLUGIN:CreateAnnotation(annotationData)
-		local newIndex = #annotations + 1
-		annotations[newIndex] = annotationData
+    function PLUGIN:AddStaticText(data)
+        local id = table.insert(texts, data)
 
-		local expirationDelay = (annotationData.remainingTime or ix.config.Get("annotationDuration", 240)) * 60
-		timer.Create("ixAnnotationExpire" .. newIndex, expirationDelay, 1, function()
-			self:DeleteAnnotation(newIndex)
-		end)
+        -- Таймер для удаления текста
+        timer.Create("ixStaticText"..id, ix.config.Get("staticTextLifeTime", 240) * 60, 1, function()
+            self:RemoveStaticText(id)
+        end)
 
-		netstream.Start(nil, "ixAnnotationCreate", annotationData)
-	end
+        netstream.Start(nil, "ixStaticTextAdd", data)
+    end
 
-	function PLUGIN:DeleteAnnotation(index)
-		local annotation = table.remove(annotations, index)
+    function PLUGIN:RemoveStaticText(id)
+        if (texts[id]) then
+            table.remove(texts, id)
 
-		if annotation then
-			local timerName = "ixAnnotationExpire" .. index
-			if timer.Exists(timerName) then
-				timer.Remove(timerName)
-			end
+            -- Удаляем таймер
+            local timerId = "ixStaticText"..id
+            if (timer.Exists(timerId)) then
+                timer.Remove(timerId)
+            end
 
-			netstream.Start(nil, "ixAnnotationDelete", index)
-		end
-	end
+            netstream.Start(nil, "ixStaticTextRemove", id)
+        end
+    end
 
-	function PLUGIN:clientInitialSpawn(client)
-		timer.Simple(2, function()
-			if IsValid(client) then
-				netstream.Start(client, "ixAnnotationSync", annotations)
-			end
-		end)
-	end
+    function PLUGIN:PlayerInitialSpawn(client)
+        timer.Simple(2, function()
+            netstream.Start(client, "ixStaticTextSet", texts)
+        end)
+    end
 
-	function PLUGIN:SaveData()
-		for index, annotation in ipairs(annotations) do
-			local timerName = "ixAnnotationExpire" .. index
-			if timer.Exists(timerName) then
-				annotation.remainingTime = timer.TimeLeft(timerName)
-			end
-		end
+    function PLUGIN:SaveData()
+        for k, v in pairs(texts) do
+            local timerId = "ixStaticText"..k
+            
+            if (timer.Exists(timerId)) then
+                v.timeLeft = timer.TimeLeft(timerId)
+            end
+        end
 
-		ix.data.Set("mapannotations", annotations)
-	end
+        ix.data.Set("statictexts", texts)
+    end
 
-	function PLUGIN:LoadData()
-		local savedAnnotations = ix.data.Get("mapannotations", {})
+    function PLUGIN:LoadData()
+        local loaded = ix.data.Get("statictexts", {})
 
-		for _, annotation in ipairs(savedAnnotations) do
-			self:CreateAnnotation(annotation)
-		end
-	end
+        for k, v in pairs(loaded) do
+            self:AddStaticText(v)
+        end
+    end
 end
